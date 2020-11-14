@@ -1,0 +1,129 @@
+id: arctic_plop2
+label: CCSDS PLOP-2
+flags: throttle
+category: '[Arctic Space Tech]'
+
+templates:
+  imports: |-
+    import arctic
+    from arctic.plop2 import ENCODING_SCHEMES as es
+  make: arctic.plop2(${output_rate}, ${latency_protection}, ${syncword}, ${encoding}, ${randomizer_on}, ${bind_addr}, ${bind_port}, ${tcp_recv_buf_size})
+
+#  Make one 'parameters' list entry for every parameter you want settable from the GUI.
+#     Keys include:
+#     * id (makes the value accessible as \$keyname, e.g. in the make entry)
+#     * label (label shown in the GUI)
+#     * dtype (e.g. int, float, complex, byte, short, xxx_vector, ...)
+parameters:
+- id: output_rate
+  label: Output Rate
+  dtype: int
+  default: 1200
+- id: latency_protection
+  label: Latency Protection
+  dtype: int
+  default: 50
+  hide: part
+- id: syncword
+  label: "Acquisition Sequence\n(CMM-2)"
+  dtype: string
+  default: 1010101010101010
+  hide: part
+- id: encoding
+  label: Encoding Scheme
+  dtype: enum
+  options: [es.BCH, es.LDPC1, es.LDPC2]
+  option_labels: ['BCH', 'LDPC-1 (k= 64, n=128)', 'LDPC-2 (k=256, n=512)']
+  default: 'ldpc1'
+- id: randomizer_on
+  label: TF Randomization
+  dtype: bool
+  options: [True, False]
+  option_labels: ['Yes', 'No']
+  default: True
+  hide: ${'part' if encoding=='BCH' else 'all'}
+- id: bind_addr
+  label: Bind Address
+  dtype: string
+  default: 127.0.0.1
+- id: bind_port
+  label: Bind Port 
+  dtype: int
+  default: 4005
+- id: tcp_recv_buf_size
+  label: "TCP Receive\nBuffer Size"
+  dtype: int
+  default: 20
+  hide: part
+
+#  Make one 'inputs' list entry per input and one 'outputs' list entry per output.
+#  Keys include:
+#      * label (an identifier for the GUI)
+#      * domain (optional - stream or message. Default is stream)
+#      * dtype (e.g. int, float, complex, byte, short, xxx_vector, ...)
+#      * vlen (optional - data stream vector length. Default is 1)
+#      * optional (optional - set to 1 for optional inputs. Default is 0)
+#inputs:
+#- label: in
+#  dtype: byte
+
+outputs:
+- label: out
+  dtype: byte
+
+documentation: |-
+  
+  Description:
+
+  This block impelements Physical Layer Operations (PLOP-2) as per CCSDS' TC Synchronization and Channel Coding standard recommendation.
+  Once running, this block will listen at the designated address/port and wait for one client.
+
+  Initially the block outputs continuous zeros until a client connects (CMM-1). \
+  When a client connects, the block internally switches state to CMM-2, and outputs a series of bits specified in the \
+  'Acquisition Sequence' field until all the bits specified there are transmitted (CMM-2). Any data data arriving at the \
+  port during this period, is processed, to make in one or more Communication Link Transmit Units (CLTUs), and queued \
+  for later transmission.
+
+  Once the 'Acquisition Sequence' is fully transmitted, the block moves to CMM-3 or CMM-4 depending on the existence of \
+  CLTUs waiting to be transmitted. 
+
+  CMM-3 is when all the [queued] CLTUs are being transmitted. When done, moves to CMM-4.
+
+  CMM-4 is when no CLTUs are ready for transmission. So an idle sequence of alternating 1s and 0s are sent out to keep \
+  the link up. In one or more CLTUs becoming available, moves to CMM-3.
+
+  When the TCP client disconnects, all pending CLTUs are transmitted, and then block moves to CMM-1, sending all 0s, \
+  and also waiting for next client to connect.
+
+
+  Parameters:
+
+  Output Rate denotes the rate at which this block outputs bytes, each containing 1-bit information to be fed to the modulator.
+
+  Latency Protection is the number of output bytes (each containing one bit) that will be output \
+  in excess of output_rate*<time_elapsed_since_initialization>. For example, consider latency_protection=50, \
+  output_rate is 1200, and assume 1.5 seconds elapsed since the initialization of the block. 1.5*1200=1800. \
+  The block will target for 1800+50=1850 bytes (each containing a bit) to have been sent at t=1.5s \
+  since initialization. This avoids blocking the downstream blocks if they happen to consume relatively fast, \
+  and helps maintain the link with \
+  satellite in case of software freeze, by having some data ready to be fed to the modulator/SDR (typically idle \
+  sequence). Increasing this number means more delay in constructed CLTUs to leave the block. \
+  Decreasing means lesser (or no) protection against software induced link breakage.
+
+  Acquisition Sequence (CMM-2) is a string representing binary sequence that will be transmitted when the channel \
+  communicatio mode (CMM) is CMM-2. Left most bit (as written in this field) is the msb, and will be sent first.
+
+  Encoding scheme can be BCH, LDPC1 (n=128, k=64), or LDPC2 (n=512, k=256).
+
+  TF Randomization dictates whether transfer frames are randomized before encoding, when encoding using BCH scheme. \
+  Randomization is mandatory for LDPC1 and LDPC2.
+
+  Bind address/port to listen at.
+
+  TCP Receive Buffer Size defines size of receive buffer for single receive call. Only for performance tweaking. \
+  If the data received is greater than k÷8 bytes long, it is split into multiple transfer frames anyway.
+
+#'file_format' specifies the version of the GRC yml format used in the file
+#  and should usually not be changed.
+
+file_format: 1
