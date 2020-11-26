@@ -7,7 +7,7 @@ templates:
   imports: |-
     import arctic
     from arctic.plop2 import ENCODING_SCHEMES as es
-  make: arctic.plop2(${output_rate}, ${latency_protection}, ${syncword}, ${encoding}, ${randomizer_on}, ${bind_addr}, ${bind_port}, ${tcp_recv_buf_size})
+  make: arctic.plop2(${output_rate}, ${latency_protection}, ${syncword}, ${encoding}, ${randomizer_on}, ${append_tail_sequence}, ${bind_addr}, ${bind_port}, ${tcp_recv_buf_size})
 
 #  Make one 'parameters' list entry for every parameter you want settable from the GUI.
 #     Keys include:
@@ -34,14 +34,21 @@ parameters:
   dtype: enum
   options: [es.BCH, es.LDPC1, es.LDPC2]
   option_labels: ['BCH', 'LDPC-1 (k= 64, n=128)', 'LDPC-2 (k=256, n=512)']
-  default: 'ldpc1'
+  default: es.LDPC1
 - id: randomizer_on
-  label: TF Randomization
+  label: "Transfer Frames(s)\nRandomization"
   dtype: bool
-  options: [True, False]
-  option_labels: ['Yes', 'No']
-  default: True
-  hide: ${'part' if encoding=='BCH' else 'all'}
+  options: ['True', 'False']
+  option_labels: ["Yes, randomize.", 'No randomization.']
+  default: 'True'
+  hide: ${ ('part' if str(encoding)=='es.BCH' else 'all') }
+- id: append_tail_sequence
+  label: Tail Sequence
+  dtype: bool
+  options: ['True', 'False']
+  option_labels: ['Yes, append tail seq', 'No tail sequence']
+  default: 'True'
+  hide: ${ ('part' if str(encoding)=='es.LDPC1' else 'all') }
 - id: bind_addr
   label: Bind Address
   dtype: string
@@ -55,6 +62,10 @@ parameters:
   dtype: int
   default: 20
   hide: part
+
+asserts:
+- ${ len(syncword)>=2 and (all([c=='0' or c=='1' for c in str(syncword)])) }
+- ${ latency_protection>=0 and latency_protection<=output_rate }
 
 #  Make one 'inputs' list entry per input and one 'outputs' list entry per output.
 #  Keys include:
@@ -115,8 +126,12 @@ documentation: |-
 
   Encoding scheme can be BCH, LDPC1 (n=128, k=64), or LDPC2 (n=512, k=256).
 
-  TF Randomization dictates whether transfer frames are randomized before encoding, when encoding using BCH scheme. \
-  Randomization is mandatory for LDPC1 and LDPC2.
+  'Transfer Frames(s) Randomization' dictates whether transfer frames are randomized before encoding, when encoding using BCH scheme. \
+  Randomization is mandatory for LDPC1 and LDPC2 and therefore always performed prior to encoding.
+
+  'Tail Sequence' dictates whether the CLTUs have a tail sequence after encoded data.
+  Tail sequence is managed only for LDPC-1(n=128, k=64).
+  It is always appended in case of BCH and never for LDPC-2(n=512, k=256).
 
   Bind address/port to listen at.
 

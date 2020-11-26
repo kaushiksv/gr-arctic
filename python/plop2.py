@@ -71,7 +71,8 @@ class Plop2Listener(Thread):
         self.gr_block_object = kwargs['gr_block_object']
         
         # Start sequence bitstream
-        self.p2 = Plop2Encoder( encoding_scheme = self.encoding_scheme,
+        self.p2 = Plop2Encoder( append_tail_sequence = kwargs['append_tail_sequence'],
+                                encoding_scheme = self.encoding_scheme,
                                 randomization_requested = kwargs['randomization_requested'] )
         self.CLTUs = deque()
         
@@ -132,14 +133,12 @@ class Plop2Listener(Thread):
 
 
 class plop2(gr.sync_block):
-    """
-    docstring for block plop2 
-    """
     def __init__(self,  sample_rate=1200,
                         latency_protection=50,
                         syncword='1010101010101010',
                         encoding='ldpc1',
                         randomizer_on=True,
+                        append_tail_sequence=True,
                         bind_addr='127.0.0.1', bind_port=4005, tcp_recv_buf_size=4096):
 
         gr.sync_block.__init__(self,
@@ -148,6 +147,7 @@ class plop2(gr.sync_block):
             out_sig=[np.byte])
         # self.bind_addr = bind_addr
         # self.bind_port = bind_port
+        self.syncword = np.array(list(syncword), dtype=np.uint64)
         self.current_state = CARRIER_MODULATION_MODES.CMM_1
         self.state_handler = CARRIER_MODULATION_MODES.cmm_handler_mappings(self)
         params_dict = { 'bind_addr'  : bind_addr,
@@ -155,14 +155,13 @@ class plop2(gr.sync_block):
                         'buffer_size': tcp_recv_buf_size,
                         'encoding_scheme': encoding,
                         'randomization_requested': randomizer_on,
+                        'append_tail_sequence': append_tail_sequence,
                         'gr_block_object': self
                         }
         self.listener = Plop2Listener(**params_dict)
         self.listener.start()
         self.sample_rate = int(sample_rate)
         self.latency_protection = latency_protection
-        assert(syncword.count('0') + syncword.count('1')) == len(syncword), "Acq Seq string non-binary"
-        self.syncword = np.array(list(syncword), dtype=np.uint64)
         self.bytes_sent = 0
         self.init_time_ns = time.time_ns()
 
@@ -180,9 +179,9 @@ class plop2(gr.sync_block):
         print("CMM set to ACQ_SEQUENCE. Time = ", time.time())
 
     def acquisition_sequence(self):
-        if(self.acq_bits_sent >= 16):
+        if(self.acq_bits_sent >= len(self.syncword)):
             return self.cltu_or_idle_transmit()
-        self.acquisition_sequence_bit = self.acquisition_sequence_bit^1
+        self.acquisition_sequence_bit = self.syncword[self.acq_bits_sent]
         self.acq_bits_sent = self.acq_bits_sent + 1
         return np.uint8(self.acquisition_sequence_bit)
 
@@ -232,10 +231,12 @@ class plop2(gr.sync_block):
 
 CLTU_START_SEQUENCE_BCH  = [0xEB90 ]
 CLTU_START_SEQUENCE_LDPC = [0x0347, 0x76C7, 0x2728, 0x95B0]
+CLTU_TAIL_SEQUENCE_BCH   = [0xC5C5, 0xC5C5, 0xC5C5, 0xC579]
+CLTU_TAIL_SEQUENCE_LDPC  = [0x5555, 0x5556, 0xAAAA, 0xAAAA, 0x5555, 0x5555, 0x5555, 0x5555]
 
 TRANSFER_FRAME_LENGTHS = {'bch'  : 56, 'ldpc1':  64, 'ldpc2': 256} #k
 CODEWORD_LENGTHS       = {'bch'  : 64, 'ldpc1': 128, 'ldpc2': 512} #n
-GENERATOR_MAT_MAKER    = {'bch'  : None,
+GENERATOR_MAT_MAKER    = {'bch'  : plop_utils.get_bch_G,
                           'ldpc1': plop_utils.get_ldpc_code1_G_uint64, #Make Generator matrix
                           'ldpc2': plop_utils.get_ldpc_code2_G_uint64
                           }
@@ -261,11 +262,14 @@ class Plop2Encoder:
 
         self.start_seq = CLTU_START_SEQUENCE_BCH if self.usingBCH else CLTU_START_SEQUENCE_LDPC
         self.start_seq = plop_utils.bittify16([self.start_seq])[0]
-        self.tail_seq  = None
 
-        if self.usingBCH:
-            print("Exitting due to invalid encoding_scheme")
-            sys.exit(1001)
+        if(self.usingBCH or (self.usingLDPC1 and kwargs['append_tail_sequence'])):
+            self.tail_seq  = {'bch'  : CLTU_TAIL_SEQUENCE_BCH,
+                              'ldpc1': CLTU_START_SEQUENCE_LDPC }[self.encoding_scheme]
+            self.tail_seq = plop_utils.bittify16([self.tail_seq])[0]
+        else:
+            self.tail_seq = None
+
         # self.G = np.transpose(np.concatenate((np.identity(64, dtype=np.uint8), plop_utils.bittify16(W)), axis=1))
         # print("Plop2Encoder::init. W shape is {}".format(np.shape(W)))
         # print("Plop2Encoder::init. G shape is {}".format(np.shape(self.G)))
