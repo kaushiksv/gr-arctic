@@ -1,7 +1,6 @@
-This is the arctic-write-a-block package meant as a guide to building
-out-of-tree packages. To use the arctic blocks, the Python namespaces
-is in 'arctic', which is imported as:
+This GNU-Radio OOT module provides blocks that implement the CCSDS recommended standard for _TC Synchronization and Channel Coding (CCSDS 231.0-B-3)_
 
+For develeopment/testing, the module maybe imported with command:
     import arctic
 
 See the Doxygen documentation for details about the blocks available
