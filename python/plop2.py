@@ -47,20 +47,11 @@ class CARRIER_MODULATION_MODES:
     IDLE_SEQUENCE = CMM_4 # <-- Attn
     CLTU          = CMM_3
 
-    @staticmethod
-    def cmm_handler_mappings(obj):
-        return {
-                   CARRIER_MODULATION_MODES.CARRIER_ONLY:  obj.carrier_only,
-                   CARRIER_MODULATION_MODES.ACQ_SEQUENCE:  obj.acquisition_sequence,
-                   CARRIER_MODULATION_MODES.IDLE_SEQUENCE: obj.cltu_or_idle_transmit,
-                   CARRIER_MODULATION_MODES.CLTU:          obj.cltu_or_idle_transmit
-               }
-
 class Plop2Listener(Thread):
     def __init__(self, *args, **kwargs):
         Thread.__init__(self)
         self.killed = False
-        
+
         # TCP configs
         self.bind_addr = kwargs['bind_addr']
         self.bind_port = kwargs['bind_port']
@@ -84,53 +75,31 @@ class Plop2Listener(Thread):
         return None
 
     def run(self):
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s.bind((self.bind_addr, self.bind_port))
-        self.s.listen(1)
         while(1):
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s.bind((self.bind_addr, self.bind_port))
+            self.s.listen(1)
             conn, addr = self.s.accept()
             self.conn = conn
             self.addr = addr
-            print('Client connected: ', addr)
+            gr.log.info("Client connected: {0}".format(addr))
             self.gr_block_object.begin_acquisition()
-            while 1:
+            while self.killed is False:
                 data = conn.recv(self.buffer_size) 
-                if data is None:
+                if data is None or len(data)==0:
                     break
                 data = plop_utils.bittify8(data)
                 self.CLTUs.extend(self.p2.make_cltu(data))
             conn.close()
-            while (leftover_bits := len(self.CLTUs)) >= 1:
-                sleep(leftover_bits / self.gr_block_object.sample_rate)
-            while self.gr_block_object.current_state!=CARRIER_MODULATION_MODES.IDLE_SEQUENCE:
-                sleep(5/self.gr_block_object.sample_rate)
+            gr.log.info("Client disconnected: {0}".format(addr))
             self.gr_block_object.current_state = CARRIER_MODULATION_MODES.CARRIER_ONLY
+            self.gr_block_object.state_handler = \
+                self.gr_block_object.cmm_handler_mappings[self.gr_block_object.current_state]
+            if self.killed:
+                return 0
 
-    def start(self): 
-        self.__run_backup = self.run 
-        self.run = self.__run       
-        Thread.start(self) 
-
-    def __run(self): 
-        sys.settrace(self.globaltrace) 
-        self.__run_backup() 
-        self.run = self.__run_backup 
-
-    def globaltrace(self, frame, event, arg): 
-        if event == 'call': 
-          return self.localtrace 
-        else: 
-          return None
-
-    def localtrace(self, frame, event, arg): 
-        if self.killed: 
-          if event == 'line': 
-            raise SystemExit() 
-        return self.localtrace 
-
-    def kill(self): 
+    def stop(self):
         self.killed = True
-
 
 class plop2(gr.sync_block):
     def __init__(self,  sample_rate=1200,
@@ -143,13 +112,12 @@ class plop2(gr.sync_block):
 
         gr.sync_block.__init__(self,
             name="plop2",
-            in_sig=None, #np.byte
+            in_sig=None,
             out_sig=[np.byte])
-        # self.bind_addr = bind_addr
-        # self.bind_port = bind_port
         self.syncword = np.array(list(syncword), dtype=np.uint64)
         self.current_state = CARRIER_MODULATION_MODES.CMM_1
-        self.state_handler = CARRIER_MODULATION_MODES.cmm_handler_mappings(self)
+        self.cmm_handler_mappings = self.map_cmms_to_handlers()
+        self.state_handler = self.cmm_handler_mappings[self.current_state]
         params_dict = { 'bind_addr'  : bind_addr,
                         'bind_port'  : bind_port,
                         'buffer_size': tcp_recv_buf_size,
@@ -159,11 +127,32 @@ class plop2(gr.sync_block):
                         'gr_block_object': self
                         }
         self.listener = Plop2Listener(**params_dict)
+        self.listener.daemon = True
         self.listener.start()
         self.sample_rate = int(sample_rate)
         self.latency_protection = latency_protection
         self.bytes_sent = 0
-        self.init_time_ns = time.time_ns()
+        self.init_time_s = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+
+    def map_cmms_to_handlers(self):
+        return { CARRIER_MODULATION_MODES.CARRIER_ONLY:  self.carrier_only,
+                 CARRIER_MODULATION_MODES.ACQ_SEQUENCE:  self.acquisition_sequence,
+                 CARRIER_MODULATION_MODES.IDLE_SEQUENCE: self.cltu_or_idle_transmit,
+                 CARRIER_MODULATION_MODES.CLTU:          self.cltu_or_idle_transmit }
+
+    def stop(self):
+        gr.log.info("PLOP-2 total exec time is {0}s".format(
+            time.clock_gettime(time.CLOCK_MONOTONIC_RAW) - self.init_time_s))
+        return True
+
+    # def __del__(self, *args, **kwargs):
+    #     print("Total Exec time (sec) = ",
+    #         self.init_time_s-time.clock_gettime(time.CLOCK_MONOTONIC_RAW) )
+    #     self.listener.stop()
+    #     self.listener.conn.close()
+    #     self.listener.s.close()
+    #     self.listener.join()
+    #     super(plop2, self).__del__(*args, **kwargs)
 
     #################################
     ## CMM state change methods begins
@@ -175,8 +164,9 @@ class plop2(gr.sync_block):
     def begin_acquisition(self):
         self.acquisition_sequence_bit = np.uint8(0)
         self.current_state = CARRIER_MODULATION_MODES.ACQ_SEQUENCE
+        self.state_handler = self.cmm_handler_mappings[self.current_state]
         self.acq_bits_sent = 0
-        print("CMM set to ACQ_SEQUENCE. Time = ", time.time())
+        # gr.log.info("CMM set to ACQ_SEQUENCE. Time = ", time.time())
 
     def acquisition_sequence(self):
         if(self.acq_bits_sent >= len(self.syncword)):
@@ -187,6 +177,7 @@ class plop2(gr.sync_block):
 
     def begin_idling(self):
         self.current_state = CARRIER_MODULATION_MODES.IDLE_SEQUENCE
+        self.state_handler = self.cmm_handler_mappings[self.current_state]
         self.idle_sequence_bit = 1 # 231xb0.pdf sec 7.2.4. Gets inverted before sending, begins with 0
         # print("CMM set to IDLE_SEQUENCE. Time = ", time.time())
 
@@ -197,35 +188,26 @@ class plop2(gr.sync_block):
                 self.begin_idling()
             self.idle_sequence_bit = self.idle_sequence_bit^1
             outbit = self.idle_sequence_bit
-        else:
-            # if(self.current_state != CARRIER_MODULATION_MODES.CLTU):
-            #     print("CMM set to CLTU. Time = ", time.time())
+        elif(self.current_state != CARRIER_MODULATION_MODES.CLTU):
+            # print("CMM set to CLTU. Time = ", time.time())
             self.current_state = CARRIER_MODULATION_MODES.CLTU
+            self.state_handler = self.cmm_handler_mappings[self.current_state]
         return outbit
     #################################
     ## CMM state change methods end
     #################################
 
-
-    #def forecast(self, noutput_items, ninput_items_required):
-    #    #setup size of input_items[i] for work call
-    #    for i in range(len(ninput_items_required)):
-    #        ninput_items_required[i] = 0
-
     def get_n_bytes_to_send(self):
-        time_now = time.time_ns()
-        time_dif = time_now - self.init_time_ns
-        target_sample_count = math.floor(self.sample_rate*time_dif/1000000000)
+        time_now = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+        time_dif = time_now - self.init_time_s
+        target_sample_count = math.floor(self.sample_rate*time_dif)
         return (target_sample_count +self.latency_protection - self.bytes_sent)
 
     def work(self, input_items, output_items):
         n_bytes_to_send = self.get_n_bytes_to_send()
         for i in range(n_bytes_to_send):
-            output_items[0][i] = self.state_handler[self.current_state]()
+            output_items[0][i] = self.state_handler()
         self.bytes_sent += n_bytes_to_send
-        #if(n_bytes_to_send!=len(output_items[0])):
-        #    print("Wierd problem")
-        #    print('n_bytes_to_send={0}, len(...)={1}'.format(n_bytes_to_send, len(output_items[0])))
         return n_bytes_to_send #len(output_items[0])
 
 
@@ -270,10 +252,6 @@ class Plop2Encoder:
         else:
             self.tail_seq = None
 
-        # self.G = np.transpose(np.concatenate((np.identity(64, dtype=np.uint8), plop_utils.bittify16(W)), axis=1))
-        # print("Plop2Encoder::init. W shape is {}".format(np.shape(W)))
-        # print("Plop2Encoder::init. G shape is {}".format(np.shape(self.G)))
-
     def generate_codeword(self, ibits):
         return pyldpc.utils.binaryproduct(ibits, self.G)
 
@@ -298,14 +276,4 @@ class Plop2Encoder:
             CLTUs.extend(codeword)
             if(self.tail_seq is not None):
                 CLTUs.extend(self.tail_seq)
-            # CLTUs.extend(np.concatenate([self.start_seq, codeword]))
         return CLTUs
-        # Avoid complexity when bits fit in one CLTU
-        # if(len(data)==64):
-        #     transfer_frame = data if self.p2.usingBCH() else self np.bitwise_xor(data, self.p2.get_n_bytes_to_send())
-        #     codeword = self.p2.make_codeword(transfer_frame)
-        #     cltu = np.concatenate([self.start_seq, codeword])
-        #     self.CLTUs.extend(cltu)
-        #     return
-        
-        # Otherwise, break into smaller chunks called transfer frames.
