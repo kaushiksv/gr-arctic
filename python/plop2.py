@@ -23,6 +23,7 @@
 import pyldpc
 import numpy as np
 import socket
+import re
 from threading import Thread #, Lock
 from collections import deque
 from gnuradio import gr
@@ -108,12 +109,17 @@ class plop2(gr.sync_block):
                         encoding='ldpc1',
                         randomizer_on=True,
                         append_tail_sequence=True,
+                        delay_time=6667,
+                        idle_seq_beginning='0',
                         bind_addr='127.0.0.1', bind_port=4005, tcp_recv_buf_size=4096):
 
         gr.sync_block.__init__(self,
             name="plop2",
             in_sig=None,
             out_sig=[np.byte])
+        syncword = re.sub('[ 01\n]', '', syncword)
+        assert(all([c=='0' or c=='1' for c in syncword]))
+        assert(delay_time >= 1000000*8/sample_rate)
         self.syncword = np.array(list(syncword), dtype=np.uint64)
         self.current_state = CARRIER_MODULATION_MODES.CMM_1
         self.cmm_handler_mappings = self.map_cmms_to_handlers()
@@ -126,8 +132,13 @@ class plop2(gr.sync_block):
                         'append_tail_sequence': append_tail_sequence,
                         'gr_block_object': self
                         }
+        self.idle_seq_beginning = int(idle_seq_beginning)
+        self.delay_time_bitcnt = math.ceil(delay_time*sample_rate/1000000)
+        self.n_mandatory_idle_bits_pending = 0
         self.listener = Plop2Listener(**params_dict)
         self.listener.daemon = True
+        self.cltu_length = self.listener.p2.cltu_length
+        self.n_cltu_bits_sent = 0
         self.listener.start()
         self.sample_rate = int(sample_rate)
         self.latency_protection = latency_protection
@@ -166,6 +177,7 @@ class plop2(gr.sync_block):
         self.current_state = CARRIER_MODULATION_MODES.ACQ_SEQUENCE
         self.state_handler = self.cmm_handler_mappings[self.current_state]
         self.acq_bits_sent = 0
+        plop_utils.btg_counter = 0
         # gr.log.info("CMM set to ACQ_SEQUENCE. Time = ", time.time())
 
     def acquisition_sequence(self):
@@ -178,20 +190,35 @@ class plop2(gr.sync_block):
     def begin_idling(self):
         self.current_state = CARRIER_MODULATION_MODES.IDLE_SEQUENCE
         self.state_handler = self.cmm_handler_mappings[self.current_state]
-        self.idle_sequence_bit = 1 # 231xb0.pdf sec 7.2.4. Gets inverted before sending, begins with 0
+        self.idle_sequence_bit = 1^self.idle_seq_beginning # 231xb0.pdf sec 7.2.4. Gets inverted before sending, begins with 0
         # print("CMM set to IDLE_SEQUENCE. Time = ", time.time())
 
+    def get_delay_time_idle_bit(self):
+        self.n_mandatory_idle_bits_pending -= 1
+        self.idle_sequence_bit      = self.idle_sequence_bit^1
+        return self.idle_sequence_bit
+
     def cltu_or_idle_transmit(self):
-        outbit = self.listener.fetch_cltu_bit_if_available()
+        if self.n_cltu_bits_sent == self.cltu_length:
+            self.n_cltu_bits_sent = 0
+            self.n_mandatory_idle_bits_pending = self.delay_time_bitcnt
+            self.begin_idling()
+            return self.get_delay_time_idle_bit()
+        elif self.n_mandatory_idle_bits_pending > 0:
+            return self.get_delay_time_idle_bit()
+        else:
+            outbit = self.listener.fetch_cltu_bit_if_available()
         if(outbit==None):
             if(self.current_state != CARRIER_MODULATION_MODES.IDLE_SEQUENCE):
                 self.begin_idling()
             self.idle_sequence_bit = self.idle_sequence_bit^1
             outbit = self.idle_sequence_bit
-        elif(self.current_state != CARRIER_MODULATION_MODES.CLTU):
-            # print("CMM set to CLTU. Time = ", time.time())
-            self.current_state = CARRIER_MODULATION_MODES.CLTU
-            self.state_handler = self.cmm_handler_mappings[self.current_state]
+        else:
+            if(self.current_state != CARRIER_MODULATION_MODES.CLTU):
+                # print("CMM set to CLTU. Time = ", time.time())
+                self.current_state = CARRIER_MODULATION_MODES.CLTU
+                self.state_handler = self.cmm_handler_mappings[self.current_state]
+            self.n_cltu_bits_sent += 1
         return outbit
     #################################
     ## CMM state change methods end
@@ -251,6 +278,7 @@ class Plop2Encoder:
             self.tail_seq = plop_utils.bittify16([self.tail_seq])[0]
         else:
             self.tail_seq = None
+        self.cltu_length = len(self.start_seq) + self.n + len(self.tail_seq)
 
     def generate_codeword(self, ibits):
         return pyldpc.utils.binaryproduct(ibits, self.G)

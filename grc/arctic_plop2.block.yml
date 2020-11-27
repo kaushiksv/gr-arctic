@@ -5,9 +5,20 @@ category: '[Arctic Space Tech]'
 
 templates:
   imports: |-
+    import re
     import arctic
     from arctic.plop2 import ENCODING_SCHEMES as es
-  make: arctic.plop2(${output_rate}, ${latency_protection}, ${syncword}, ${encoding}, ${randomizer_on}, ${append_tail_sequence}, ${bind_addr}, ${bind_port}, ${tcp_recv_buf_size})
+  make: arctic.plop2( ${output_rate},
+                      ${latency_protection},
+                      """${syncword}""",
+                      ${encoding},
+                      ${randomizer_on},
+                      ${append_tail_sequence},
+                      ${delay_time},
+                      ${idle_seq_beginning},
+                      ${bind_addr},
+                      ${bind_port},
+                      ${tcp_recv_buf_size})
 
 #  Make one 'parameters' list entry for every parameter you want settable from the GUI.
 #     Keys include:
@@ -26,18 +37,24 @@ parameters:
   hide: part
 - id: syncword
   label: "Acquisition Sequence\n(CMM-2)"
-  dtype: string
-  default: 1010101010101010
+  dtype: _multiline
+  default: "01010101010101010101010101010101\n\
+            01010101010101010101010101010101\n\
+            01010101010101010101010101010101\n\
+            01010101010101010101010101010101\n"
   hide: part
+  category: 'PLOP-2/CLTU'
 - id: encoding
   label: Encoding Scheme
+  category: 'PLOP-2/CLTU'
   dtype: enum
   options: [es.BCH, es.LDPC1, es.LDPC2]
   option_labels: ['BCH', 'LDPC-1 (k= 64, n=128)', 'LDPC-2 (k=256, n=512)']
   default: es.LDPC1
 - id: randomizer_on
-  label: "Transfer Frames(s)\nRandomization"
+  label: "Transfer Frame\nRandomization"
   dtype: bool
+  category: 'PLOP-2/CLTU'
   options: ['True', 'False']
   option_labels: ["Yes, randomize.", 'No randomization.']
   default: 'True'
@@ -45,10 +62,23 @@ parameters:
 - id: append_tail_sequence
   label: Tail Sequence
   dtype: bool
+  category: 'PLOP-2/CLTU'
   options: ['True', 'False']
   option_labels: ['Yes, append tail seq', 'No tail sequence']
   default: 'True'
   hide: ${ ('part' if str(encoding)=='es.LDPC1' else 'all') }
+- id: delay_time
+  label: "Delay-time (µs)"
+  hide: 'part'
+  category: 'PLOP-2/CLTU'
+  dtype: float
+  default: 6667
+- id: idle_seq_beginning
+  label: "IDLE_SEQUENCE\nbegins with:"
+  hide: 'part'
+  category: 'PLOP-2/CLTU'
+  options: [0, 1]
+  default: 0
 - id: bind_addr
   label: Bind Address
   dtype: string
@@ -64,8 +94,9 @@ parameters:
   hide: part
 
 asserts:
-- ${ len(syncword)>=2 and (all([c=='0' or c=='1' for c in str(syncword)])) }
+- ${ len(syncword)>=2 and (all([(c in ['0', '1', '\n', ' ']) for c in str(syncword)])) }
 - ${ latency_protection>=0 and latency_protection<=output_rate }
+- ${ delay_time >= 1000000*8/output_rate }
 
 #  Make one 'inputs' list entry per input and one 'outputs' list entry per output.
 #  Keys include:
