@@ -55,42 +55,36 @@ def get_ldpc_code2_G_uint64():
 	W[128, :]  = [0xF6739BCF54273E77, 0x167BDA120C6C4774, 0x4C071EFF5E32A759, 0x3138670C095C39B5]
 	W[192, :]  = [0x28706BD045300258, 0x2DAB85F05B9201D0, 0x8DFDEE2D9D84CA88, 0xB371FAE63A4EB07E]
 	W = bittify_uint64(W, select_rows=[0, 64, 128, 192])
-	for j in range(256):
-		for i in range(1, 64):
-			W[ i,     (j+i)%256 ] = W[  0][j]
-			W[ i+64,  (j+i)%256 ] = W[ 64][j]
-			W[ i+128, (j+i)%256 ] = W[128][j]
-			W[ i+192, (j+i)%256 ] = W[192][j]
+	for m in range(4):
+		for j in range(64):
+			for i in range(1, 64):
+				W[ i,     m*64 + (j+i)%64 ] = W[  0][m*64 + j]
+				W[ i+64,  m*64 + (j+i)%64 ] = W[ 64][m*64 + j]
+				W[ i+128, m*64 + (j+i)%64 ] = W[128][m*64 + j]
+				W[ i+192, m*64 + (j+i)%64 ] = W[192][m*64 + j]
 	
 	I_256 = np.eye(256, dtype=np.uint64)
 	G = np.concatenate((I_256, W), axis=1)
 	return G
 
-	# for i in range(1,64):
-	# 	W[ i     ] = unbounded_rotate_4x( W[ i-1     ] )
-	# 	W[ i+64  ] = unbounded_rotate_4x( W[ i-1+64  ] )
-	# 	W[ i+128 ] = unbounded_rotate_4x( W[ i-1+128 ] ) #New rotation. Same for H. G*H verify. pyldpc, custom impl, plop2 producer/consumer.
-	# 	W[ i+192 ] = unbounded_rotate_4x( W[ i-1+192 ] )
-	
-	
-
 def get_ldpc_code1_G_uint64():
-	W = np.zeros([64, 4], dtype=np.uint64)
+	W = np.zeros([64, 4])
 	W[0,:]  = [0x0e69, 0x166b, 0xef4c, 0x0bc2]
 	W[16,:] = [0x7766, 0x137e, 0xbb24, 0x8418]
 	W[32,:] = [0xc480, 0xfeb9, 0xcd53, 0xa713]
 	W[48,:] = [0x4eaa, 0x22fa, 0x465e, 0xea11]
-	# print("line40: " + "{}".format(type(W[0])))
-	# print("line41: " + "{}".format(type(W[i-1])))
-	for i in range(1,16):
-		W[i] = unbounded_rotate_4x(W[i-1])
-		W[i+16] = unbounded_rotate_4x(W[i-1+16])
-		W[i+32] = unbounded_rotate_4x(W[i-1+32]) #New rotation. Same for H. G*H verify. pyldpc, custom impl, plop2 producer/consumer.
-		W[i+48] = unbounded_rotate_4x(W[i-1+48])
+	W = bittify16(W, select_rows=[0, 16, 32, 48])
+	for m in range(4):
+		for j in range(16):
+			for i in range(1, 16):
+				W[ i,    m*16 + (j+i)%16 ] = W[ 0][m*16 + j]
+				W[ i+16, m*16 + (j+i)%16 ] = W[16][m*16 + j]
+				W[ i+32, m*16 + (j+i)%16 ] = W[32][m*16 + j]
+				W[ i+48, m*16 + (j+i)%16 ] = W[48][m*16 + j]
 	# If M=16, 4M=64 bits => 8 Bytes. => 4 u int16s
 	# I_4 = np.zeros([64, 4], dtype=np.uint64)
 	I_64bits = np.eye(64, dtype=np.uint64)
-	G = np.concatenate((I_64bits, bittify16(W)), axis=1)
+	G = np.concatenate((I_64bits, W), axis=1)
 	return G
 
 Im = np.array([	[0x8000], 
@@ -131,12 +125,13 @@ def get_ldpc_code1_H_uint64():
 def get_ldpc_matrices():
 	return (get_ldpc_code1_G(), get_ldpc_code1_H())
 
-def bittify16(I):
+def bittify16(I, select_rows=None):
 	sz = np.shape(I)
 	O = np.zeros([sz[0], 16*sz[1]], dtype=np.uint64)
 	# print(sz)
 	# print(O.shape)
-	for i in range(sz[0]):
+	iterable_rows = range(sz[0]) if select_rows is None else select_rows
+	for i in iterable_rows:
 		# print(i)
 		for j in range(16*sz[1]):
 			bit_number = 15-(int(j)%16)
