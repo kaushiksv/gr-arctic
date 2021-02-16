@@ -274,7 +274,7 @@ class Plop2Encoder:
 
         if(self.usingBCH or (self.usingLDPC1 and kwargs['append_tail_sequence'])):
             self.tail_seq  = {'bch'  : CLTU_TAIL_SEQUENCE_BCH,
-                              'ldpc1': CLTU_START_SEQUENCE_LDPC }[self.encoding_scheme]
+                              'ldpc1': CLTU_TAIL_SEQUENCE_LDPC }[self.encoding_scheme]
             self.tail_seq = plop_utils.bittify16([self.tail_seq])[0]
         else:
             self.tail_seq = None
