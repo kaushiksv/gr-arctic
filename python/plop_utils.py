@@ -248,3 +248,6 @@ def get_bch_P():
 def get_bch_G():
 	P = get_bch_P()
 	return np.concatenate((np.eye(56), P, np.zeros([56, 1])), axis=1)
+
+def binaryproduct(a, G):
+	return a

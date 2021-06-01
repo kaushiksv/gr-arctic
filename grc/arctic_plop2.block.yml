@@ -18,7 +18,10 @@ templates:
                       ${idle_seq_beginning},
                       ${bind_addr},
                       ${bind_port},
-                      ${tcp_recv_buf_size})
+                      ${tcp_recv_buf_size},
+                      ${token_tag_name},
+                      ${token_interval},
+                      ${max_tokens_in_flight})
 
 #  Make one 'parameters' list entry for every parameter you want settable from the GUI.
 #     Keys include:
@@ -30,6 +33,7 @@ parameters:
   label: Output Rate
   dtype: int
   default: 1200
+  hide: part
 - id: latency_protection
   label: Latency Protection
   dtype: int
@@ -83,20 +87,36 @@ parameters:
   label: Bind Address
   dtype: string
   default: 127.0.0.1
+  hide: part
 - id: bind_port
   label: Bind Port 
   dtype: int
   default: 4005
+  hide: part
 - id: tcp_recv_buf_size
   label: "TCP Receive\nBuffer Size"
   dtype: int
   default: 20
   hide: part
+- id: token_tag_name
+  label: Token Tag Name
+  dtype: string
+  default: token
+- id: token_interval
+  label: Token interval
+  dtype: int
+  default: 8
+- id: max_tokens_in_flight
+  label: Max Tokens in Flight
+  dtype: int
+  default: 240
+
 
 asserts:
 - ${ len(syncword)>=2 and (all([(c in ['0', '1', '\n', ' ']) for c in str(syncword)])) }
 - ${ latency_protection>=0 and latency_protection<=output_rate }
 - ${ delay_time >= 1000000*8/output_rate }
+- ${ token_interval%8 == 0}
 
 #  Make one 'inputs' list entry per input and one 'outputs' list entry per output.
 #  Keys include:
@@ -112,6 +132,12 @@ asserts:
 outputs:
 - label: out
   dtype: byte
+
+inputs:
+- id: token_in
+  domain: message
+- id: tc_in
+  domain: message
 
 documentation: |-
   

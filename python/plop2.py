@@ -31,6 +31,8 @@ from . import plop_utils
 import sys
 import time
 import math
+from gnuradio.gr import pmt
+import pdb
 
 class ENCODING_SCHEMES:
     BCH = 'bch'
@@ -68,6 +70,7 @@ class Plop2Listener(Thread):
                                 randomization_requested = kwargs['randomization_requested'] )
         self.CLTUs = deque()
         
+        
 
     def fetch_cltu_bit_if_available(self):
         if(len(self.CLTUs)>=1):
@@ -103,6 +106,25 @@ class Plop2Listener(Thread):
         self.killed = True
 
 class plop2(gr.sync_block):
+
+    def token_controller(self, msg):
+        pmt.car(msg) == pmt.intern(self.token_tag_name)
+        self.token_counter = self.token_counter - 1
+        # if self.token_counter <= self.max_tokens_in_flight:
+        #     release(self.work_lock) # FILLER1
+
+    def tc_controller(self, tc):
+        meta = pmt.to_python(pmt.car(tc))
+        if meta == 'tc':
+            data = str(pmt.cdr(tc))
+            if len(data) > 0:
+                cltus = self.encoder.make_cltu(data)
+                print("Extending CLTUs by {} bytes.".format(len(cltus)))
+                self.CLTUs.extend(cltus)
+        else:
+            gr.log.warn("Skipping: {}, type(car): {}".format(tc, type(meta)))
+
+
     def __init__(self,  sample_rate=1200,
                         latency_protection=50,
                         syncword='1010101010101010',
@@ -111,7 +133,12 @@ class plop2(gr.sync_block):
                         append_tail_sequence=True,
                         delay_time=6667,
                         idle_seq_beginning='0',
-                        bind_addr='127.0.0.1', bind_port=4005, tcp_recv_buf_size=4096):
+                        bind_addr='127.0.0.1',
+                        bind_port=4005,
+                        tcp_recv_buf_size=4096,
+                        token_tag_name='token',
+                        token_interval=8,
+                        max_tokens_in_flight=216):
 
         gr.sync_block.__init__(self,
             name="plop2",
@@ -144,6 +171,26 @@ class plop2(gr.sync_block):
         self.latency_protection = latency_protection
         self.bytes_sent = 0
         self.init_time_s = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+        self.idle_seq = np.repeat(0x55, 32768)
+        
+        # Token based rate control
+        self.token_counter = 0
+        self.token_tag_name = token_tag_name
+        self.token_key = pmt.intern(self.token_tag_name)
+        self.token_interval = token_interval
+        self.max_tokens_in_flight = max_tokens_in_flight
+        self.first_tag_offset = 0;
+        # self.work_lock = Lock()
+        self.CLTUs = deque()
+        self.encoder = Plop2Encoder( **params_dict) #append_tail_sequence, encoding, randomizer_on )
+        self.message_port_register_in(pmt.intern("token_in"))
+        self.PMT_TC = pmt.intern('tc')
+        self.set_msg_handler(pmt.intern("token_in"), self.token_controller)
+
+        # Message Input
+        self.message_port_register_in(pmt.intern('tc_in'))
+        self.set_msg_handler(pmt.intern("tc_in"), self.tc_controller)
+
 
     def map_cmms_to_handlers(self):
         return { CARRIER_MODULATION_MODES.CARRIER_ONLY:  self.carrier_only,
@@ -224,18 +271,68 @@ class plop2(gr.sync_block):
     ## CMM state change methods end
     #################################
 
-    def get_n_bytes_to_send(self):
-        time_now = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
-        time_dif = time_now - self.init_time_s
-        target_sample_count = math.floor(self.sample_rate*time_dif)
-        return (target_sample_count +self.latency_protection - self.bytes_sent)
+    # def get_n_bytes_to_send_using_rtc(self):
+    #     time_now = time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+    #     time_dif = time_now - self.init_time_s
+    #     target_sample_count = math.floor(self.sample_rate*time_dif)
+    #     return (target_sample_count +self.latency_protection - self.bytes_sent)
+
+    def get_max_idle_bytes(self):
+        tc = self.token_counter
+        return self.token_interval * ( self.max_tokens_in_flight - tc)
+        
+
+    def get_cltus(self, n):
+        s = np.empty(n, dtype=np.int8)
+        for i in range(n):
+            # pdb.set_trace()
+            s[i] = self.CLTUs.popleft()
+            # print("type(cltu): {}".format(type(cltu)))
+            # s = np.append(s, cltu)
+            # s = s + ''.join(cltu)
+        print("Retrieved: {}".format(len(s)))
+        # print("type(s): {}".format(type(s)))
+        return s
 
     def work(self, input_items, output_items):
-        n_bytes_to_send = self.get_n_bytes_to_send()
-        for i in range(n_bytes_to_send):
-            output_items[0][i] = self.state_handler()
-        self.bytes_sent += n_bytes_to_send
-        return n_bytes_to_send #len(output_items[0])
+        n_available_cltus = len(self.CLTUs)
+        if  n_available_cltus > 0:
+            N = min(n_available_cltus, len(output_items[0]))
+            cltu_data = self.get_cltus(N)
+            # print(">>>" + s_cltus + "<<<")
+            # pdb.set_trace()
+            output_items[0][0:N] = cltu_data
+            # print("cltu_length: {}".format(self.cltu_length))
+            # N = int(n_available_cltus*self.cltu_length)
+        else:
+            n_idle_bytes = self.get_max_idle_bytes()
+            if n_idle_bytes == 0:
+                # sleep(0.00001)
+                return 0
+            N = min(n_idle_bytes, len(output_items[0]))
+            # N = N - N%2
+            for i in range(N):
+                output_items[0][i] = 0xAA
+                #output_items[0][0:n_idle_bytes] = self.idle_seq[0:n_idle_bytes]
+            # N = n_idle_bytes
+        # for i in range(self.tag_offset, N, self.token_interval):
+            # self.add_item_tag(0, self.nitems_written(0) + i, self.token_key, pmt.PMT_NIL)
+        # self.tag_offset = ( self.tag_offset  +  N % self.token_interval ) % self.token_interval
+        tag_offsets = np.array(range(self.first_tag_offset, N, self.token_interval))
+        for i in tag_offsets:
+            self.add_item_tag(0, self.nitems_written(0) + i, self.token_key, pmt.PMT_NIL)
+        self.first_tag_offset = tag_offsets[-1] + self.token_interval - N
+        # self.first_tag_offset = (self.token_interval-1) - (N-1 - tag_offsets[-1])
+        return N
+
+
+        # n_bytes_to_send = min(self.get_n_bytes_to_send(), len(output_items[0]))
+        # if(n_bytes_to_send<(self.latency_protection/2)):
+        #     return 0
+        # for i in range(n_bytes_to_send):
+        #     output_items[0][i] = self.state_handler()
+        # self.bytes_sent += n_bytes_to_send
+        # return n_bytes_to_send #len(output_items[0])
 
 
 CLTU_START_SEQUENCE_BCH  = [0xEB90 ]
@@ -268,40 +365,56 @@ class Plop2Encoder:
         self.k = TRANSFER_FRAME_LENGTHS[self.encoding_scheme]
         self.n = CODEWORD_LENGTHS[self.encoding_scheme]
         self.G = GENERATOR_MAT_MAKER[self.encoding_scheme]()
+        self.Gtc = np.packbits(np.transpose(self.G), axis=1)
 
         self.start_seq = CLTU_START_SEQUENCE_BCH if self.usingBCH else CLTU_START_SEQUENCE_LDPC
         self.start_seq = plop_utils.bittify16([self.start_seq])[0]
+        self.start_seq = np.packbits(self.start_seq) #[chr(x) for x in np.packbits(self.start_seq)]
 
         if(self.usingBCH or (self.usingLDPC1 and kwargs['append_tail_sequence'])):
             self.tail_seq  = {'bch'  : CLTU_TAIL_SEQUENCE_BCH,
                               'ldpc1': CLTU_TAIL_SEQUENCE_LDPC }[self.encoding_scheme]
             self.tail_seq = plop_utils.bittify16([self.tail_seq])[0]
+            self.tail_seq = np.packbits(self.tail_seq) #[chr(x) for x in np.packbits(self.tail_seq)]
         else:
             self.tail_seq = None
-        self.cltu_length = len(self.start_seq) + self.n + len(self.tail_seq)
+        tail_seq_len = len(self.tail_seq) if self.tail_seq is not None else 0
+        self.cltu_length = len(self.start_seq) + self.n/8 + tail_seq_len
+        self.pctable = [bin(i)[2:].count('1') for i in range(256)]
 
-    def generate_codeword(self, ibits):
-        return pyldpc.utils.binaryproduct(ibits, self.G)
+    def xormul(self, iarray, Gtc):
+        o = [iarray&row for row in Gtc]
+        p = np.array([[self.pctable[n] for n in row] for row in o])
+        # pdb.set_trace()
+        return [c for c in np.packbits(p.sum(1)&1)] #chr(c)
 
-    def randomize_transfer_frame_and_generate_codeword(self, ibits):
-        pseudo_random_seq = plop_utils.bit_transition_generator(self.k)
-        return self.generate_codeword(ibits^pseudo_random_seq)
+    def generate_codeword(self, iarray):
+        return self.xormul(iarray, self.Gtc)
+
+    def randomize_transfer_frame_and_generate_codeword(self, iarray):
+        pseudo_random_seq = np.packbits(plop_utils.bit_transition_generator(self.k))
+        return self.generate_codeword(iarray^pseudo_random_seq)
 
     def make_cltu(self, data):
         if data is None or len(data)==0:
             return None
         # zero padding to make length multiple of self.k
-        k = self.k
-        n_excess_bits = len(data)%k
-        if(n_excess_bits != 0):
-            data = np.pad( data, (0, k-n_excess_bits ) )
+        k = int(self.k/8)
+        n_excess_bytes = len(data)%k
+        data = [ord(c) for c in data]
+        if(n_excess_bytes != 0):
+            data = np.pad( data, (0, k-n_excess_bytes ) )
         n_cltus = int(len(data)/k)
         CLTUs = []
-        transfer_frames = data.reshape((n_cltus, k))
+        transfer_frames = np.reshape(data, (n_cltus, k))
+        # transfer_frames = [ ord(c) for c in s ]
         for i in range(n_cltus):
             codeword = self.codeword_maker(transfer_frames[i])
+            # cltu = np.append(self.start_seq, codeword)
             CLTUs.extend(self.start_seq)
             CLTUs.extend(codeword)
             if(self.tail_seq is not None):
+                # cltu = np.append(cltu, self.tail_seq)
                 CLTUs.extend(self.tail_seq)
+            # CLTUs.append(cltu)
         return CLTUs
